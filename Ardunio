@@ -1,0 +1,119 @@
+/***** Includes *****/
+#include "esp_sleep.h" // Needed for deep sleep functions
+
+/***** Pin Definitions *****/
+#define CHARGE_PIN     27     // GPIO to charge the capacitor
+#define MEASURE_PIN    34     // ADC pin to measure voltage (input only)
+#define DISCHARGE_PIN  26     // GPIO to discharge capacitor
+#define GREEN_LED      21     // GPIO for green LED
+#define RED_LED        22     // GPIO for red LED
+#define BUTTON_PIN     25     // GPIO for push-button (to GND)
+
+/***** Constants *****/
+#define R              100000.0   // Known resistor value in ohms
+#define THRESHOLD_NF   100.0       // Capacitance threshold in nanofarads
+
+/***** Global Variables *****/
+bool isRunning = false;
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(CHARGE_PIN, OUTPUT);
+  pinMode(DISCHARGE_PIN, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP); // Button connected to GND
+
+  // Allow waking up from button press (button goes LOW)
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, 0); 
+
+  // Initialize all outputs LOW
+  digitalWrite(CHARGE_PIN, LOW);
+  digitalWrite(DISCHARGE_PIN, LOW);
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+
+  Serial.println("ESP32 Capacitance Meter Ready. Press the button to toggle ON/OFF.");
+}
+
+void loop() {
+  // BUTTON TOGGLE SECTION
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    delay(20); // Debounce
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      if (!isRunning) {
+        // Turn ON measurement
+        isRunning = true;
+        Serial.println("Capacitance measurement is now ON.");
+      } else {
+        // Turn OFF - Enter Deep Sleep
+        Serial.println("Going into deep sleep...");
+        delay(100); // Allow Serial to flush
+        digitalWrite(GREEN_LED, LOW);
+        digitalWrite(RED_LED, LOW);
+        digitalWrite(CHARGE_PIN, LOW);
+        digitalWrite(DISCHARGE_PIN, LOW);
+        esp_deep_sleep_start();
+      }
+
+      // Wait until button is released
+      while (digitalRead(BUTTON_PIN) == LOW) {
+        delay(10);
+      }
+    }
+  }
+
+  // IF NOT RUNNING, SKIP MEASUREMENT
+  if (!isRunning) {
+    delay(100);
+    return;
+  }
+
+  /************************************************
+   *  CAPACITANCE MEASUREMENT SECTION
+   ************************************************/
+
+  // a) Discharge the capacitor
+  digitalWrite(DISCHARGE_PIN, HIGH);
+  delay(100);
+  digitalWrite(DISCHARGE_PIN, LOW);
+
+  // b) Charge the capacitor
+  digitalWrite(CHARGE_PIN, HIGH);
+  unsigned long startTime = micros();
+  unsigned long timeout = startTime + 300000; // 300 ms timeout
+
+  while (analogRead(MEASURE_PIN) < 1860 && micros() < timeout) {
+    // wait until voltage crosses ~2/3 Vcc
+  }
+
+  digitalWrite(CHARGE_PIN, LOW);
+
+  if (micros() >= timeout) {
+    Serial.println("Timeout: Capacitance too high or disconnected.");
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+    delay(500);
+    return;
+  }
+
+  unsigned long elapsedTime = micros() - startTime;
+  float capacitance = (float)elapsedTime / (R * 0.693); // in µF
+  float capacitance_nF = capacitance * 1000; // convert to nF
+
+  Serial.print("Capacitance: ");
+  Serial.print(capacitance_nF, 3);
+  Serial.println(" nF");
+
+  // LED Indication
+  if (capacitance_nF >= THRESHOLD_NF) {
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, HIGH);
+  } else {
+    digitalWrite(GREEN_LED, HIGH);
+    digitalWrite(RED_LED, LOW);
+  }
+
+  delay(500);
+}
