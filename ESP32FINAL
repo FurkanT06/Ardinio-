@@ -1,0 +1,164 @@
+extern "C" {
+  #include "esp_wpa2.h"}
+
+#define BLYNK_TEMPLATE_ID "TMPL2KJgo40J4"
+#define BLYNK_TEMPLATE_NAME "Quickstart Template"
+#define BLYNK_AUTH_TOKEN "Zxwt7BAV3FbM2UU13lbVOYAmpsoUuSNr"
+
+#define BLYNK_PRINT Serial
+#define BLYNK_DEBUG
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include "esp_sleep.h"
+
+#define EAP_IDENTITY "ftell007"
+#define EAP_PASSWORD "Kenankomutan123."
+const char* ssid = "FIU_SECUREWiFi";
+
+char auth[] = BLYNK_AUTH_TOKEN;
+BlynkTimer timer;
+
+// GPIO pin definitions
+#define CHARGE_PIN     27
+#define MEASURE_PIN    34
+#define DISCHARGE_PIN  26
+#define GREEN_LED      21
+#define RED_LED        22
+
+#define R              100000.0   // Resistor value (ohms)
+#define THRESHOLD_NF   100.0      // Capacitance threshold (nF)
+
+bool isRunning = false;
+unsigned long startMillis;
+
+// V0 = Start/Stop Switch
+// V1 = Capacitance Gauge
+// V2 = Uptime Label
+// V3 = Virtual Red LED
+// V4 = Virtual Green LED
+
+BLYNK_WRITE(V0) {
+  int switchState = param.asInt();
+  isRunning = (switchState == 1);
+  Serial.println(isRunning ? "🟢 Measurement ON via Blynk (V0)" : "🔴 Measurement OFF via Blynk (V0)");
+
+  if (!isRunning) {
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(CHARGE_PIN, LOW);
+    digitalWrite(DISCHARGE_PIN, LOW);
+    Blynk.virtualWrite(V3, 0); // Red LED off
+    Blynk.virtualWrite(V4, 0); // Green LED off
+  }
+}
+
+void connectToWiFiEnterprise() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_STA);
+
+  esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)EAP_IDENTITY, strlen(EAP_IDENTITY));
+  esp_wifi_sta_wpa2_ent_set_username((uint8_t *)EAP_IDENTITY, strlen(EAP_IDENTITY));
+  esp_wifi_sta_wpa2_ent_set_password((uint8_t *)EAP_PASSWORD, strlen(EAP_PASSWORD));
+  esp_wifi_sta_wpa2_ent_enable();
+
+  WiFi.begin(ssid);
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\n✅ Connected to WiFi!");
+  Serial.print("📡 IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(CHARGE_PIN, OUTPUT);
+  pinMode(MEASURE_PIN, INPUT);
+  pinMode(DISCHARGE_PIN, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+
+  digitalWrite(CHARGE_PIN, LOW);
+  digitalWrite(DISCHARGE_PIN, LOW);
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+
+  connectToWiFiEnterprise();
+  Blynk.config(auth);
+  Blynk.connect();
+
+  startMillis = millis();
+
+  timer.setInterval(1000L, measureCapacitance);
+  timer.setInterval(1000L, sendUptime);
+}
+
+void loop() {
+  Blynk.run();
+  timer.run();
+}
+
+void measureCapacitance() {
+  if (!isRunning) return;
+
+  // Discharge capacitor
+  digitalWrite(DISCHARGE_PIN, HIGH);
+  delay(100);
+  digitalWrite(DISCHARGE_PIN, LOW);
+
+  // Start charging
+  digitalWrite(CHARGE_PIN, HIGH);
+  unsigned long startTime = micros();
+  unsigned long timeout = startTime + 300000;  // 300 ms max
+
+  while (analogRead(MEASURE_PIN) < 1860 && micros() < timeout) {}
+
+  digitalWrite(CHARGE_PIN, LOW);
+
+  if (micros() >= timeout) {
+    Serial.println("⚠️ Timeout: Capacitance too high or disconnected.");
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+    Blynk.virtualWrite(V3, 0);
+    Blynk.virtualWrite(V4, 0);
+    return;
+  }
+
+  // Calculate capacitance
+  unsigned long elapsedTime = micros() - startTime;
+  float capacitance = (float)elapsedTime / (R * 0.693);  // in µF
+  float capacitance_nF = capacitance * 1000;             // convert to nF
+
+  Serial.print("📏 Capacitance: ");
+  Serial.print(capacitance_nF, 3);
+  Serial.println(" nF");
+
+  // Update gauge
+  Blynk.virtualWrite(V1, capacitance_nF);
+
+  // Update physical and virtual LEDs
+  if (capacitance_nF >= THRESHOLD_NF) {
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, HIGH);
+    Blynk.virtualWrite(V3, 255);  // Red ON
+    Blynk.virtualWrite(V4, 0);    // Green OFF
+  } else {
+    digitalWrite(GREEN_LED, HIGH);
+    digitalWrite(RED_LED, LOW);
+    Blynk.virtualWrite(V3, 0);    // Red OFF
+    Blynk.virtualWrite(V4, 255);  // Green ON
+  }
+}
+
+void sendUptime() {
+  unsigned long uptimeSec = (millis() - startMillis) / 1000;
+  Blynk.virtualWrite(V2, uptimeSec);
+}
