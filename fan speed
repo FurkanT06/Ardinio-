@@ -1,0 +1,227 @@
+#define BLYNK_TEMPLATE_ID "TMPL2KJgo40J4"
+#define BLYNK_TEMPLATE_NAME "Quickstart Template"
+#define BLYNK_AUTH_TOKEN "Zxwt7BAV3FbM2UU13lbVOYAmpsoUuSNr"
+
+#include <Arduino.h>
+
+extern "C" {
+  #include "esp_wpa2.h"}
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include "esp_sleep.h"
+
+#define EAP_IDENTITY "ftell007"
+#define EAP_PASSWORD "Kenankomutan123."
+const char* ssid = "FIU_SECUREWiFi";
+
+#define BLYNK_PRINT Serial
+
+char auth[] = BLYNK_AUTH_TOKEN;
+BlynkTimer timer;
+
+// 🔧 Pin Definitions
+#define CHARGE_PIN     27
+#define MEASURE_PIN    34
+#define DISCHARGE_PIN  32
+#define GREEN_LED      21
+#define RED_LED        22
+#define BUTTON_PIN     25      // Push-button to toggle measurement
+#define FAN_POWER_GPIO 33      // Moved fan power control to GPIO 33
+#define FAN_SPEED_GPIO 26
+
+// 🧠 Constants
+#define R              100000.0
+#define THRESHOLD_NF   100.0
+
+// 🔌 Virtual Pins
+#define VPIN_MEASURE_SWITCH V0
+#define VPIN_CAPACITANCE    V1
+#define VPIN_UPTIME         V2
+#define VPIN_LED_RED        V3
+#define VPIN_LED_GREEN      V4
+#define VPIN_FAN_POWER      V5
+
+bool isRunning = false;
+bool fanIsOn = false;
+int fanSpeedLevel = 1;
+unsigned long startMillis;
+
+void connectToWiFiEnterprise() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_STA);
+
+  esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)EAP_IDENTITY, strlen(EAP_IDENTITY));
+  esp_wifi_sta_wpa2_ent_set_username((uint8_t *)EAP_IDENTITY, strlen(EAP_IDENTITY));
+  esp_wifi_sta_wpa2_ent_set_password((uint8_t *)EAP_PASSWORD, strlen(EAP_PASSWORD));
+  esp_wifi_sta_wpa2_ent_enable();
+
+  WiFi.begin(ssid);
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\n✅ Connected to WiFi!");
+  Serial.print("📡 IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(CHARGE_PIN, OUTPUT);
+  pinMode(MEASURE_PIN, INPUT);
+  pinMode(DISCHARGE_PIN, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(FAN_POWER_GPIO, OUTPUT);   // Now GPIO 33
+  pinMode(FAN_SPEED_GPIO, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP); // Toggle measurement
+
+  digitalWrite(CHARGE_PIN, LOW);
+  digitalWrite(DISCHARGE_PIN, LOW);
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(FAN_POWER_GPIO, HIGH); // HIGH = Fan off
+  digitalWrite(FAN_SPEED_GPIO, LOW);
+
+  connectToWiFiEnterprise();
+  Blynk.config(auth);
+  Blynk.connect();
+
+  startMillis = millis();
+
+  timer.setInterval(1000L, measureCapacitance);
+  timer.setInterval(1000L, sendUptime);
+}
+
+void loop() {
+  Blynk.run();
+  timer.run();
+
+  // 🔘 Button to toggle isRunning (does NOT affect fan)
+  static bool lastButtonState = HIGH;
+  bool currentButtonState = digitalRead(BUTTON_PIN);
+
+  if (lastButtonState == HIGH && currentButtonState == LOW) {
+    isRunning = !isRunning;
+    Serial.println(isRunning ? "🟢 Measurement ON (via button)" : "🔴 Measurement OFF (via button)");
+
+    if (!isRunning) {
+      digitalWrite(GREEN_LED, LOW);
+      digitalWrite(RED_LED, LOW);
+      digitalWrite(CHARGE_PIN, LOW);
+      digitalWrite(DISCHARGE_PIN, LOW);
+      Blynk.virtualWrite(VPIN_MEASURE_SWITCH, 0);
+      Blynk.virtualWrite(VPIN_LED_RED, 0);
+      Blynk.virtualWrite(VPIN_LED_GREEN, 0);
+    } else {
+      Blynk.virtualWrite(VPIN_MEASURE_SWITCH, 1);
+    }
+
+    delay(300); // Debounce
+  }
+
+  lastButtonState = currentButtonState;
+}
+
+// 🟢 MEASURE SWITCH from Blynk
+BLYNK_WRITE(VPIN_MEASURE_SWITCH) {
+  isRunning = param.asInt();
+  Serial.println(isRunning ? "🟢 Measurement ON" : "🔴 Measurement OFF");
+
+  if (!isRunning) {
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(CHARGE_PIN, LOW);
+    digitalWrite(DISCHARGE_PIN, LOW);
+    Blynk.virtualWrite(VPIN_LED_RED, 0);
+    Blynk.virtualWrite(VPIN_LED_GREEN, 0);
+  }
+}
+
+// ✅ FAN POWER BUTTON (Now uses GPIO 33)
+BLYNK_WRITE(VPIN_FAN_POWER) {
+  fanIsOn = !fanIsOn;
+  digitalWrite(FAN_POWER_GPIO, fanIsOn ? LOW : HIGH);
+  Blynk.virtualWrite(VPIN_FAN_POWER, fanIsOn);
+}
+
+// 🔥 FAN SPEED BUTTONS
+void setFanSpeed(int level) {
+  fanSpeedLevel = constrain(level, 1, 5);
+  Serial.print("💨 Fan Speed Set To: ");
+  Serial.println(fanSpeedLevel);
+
+  for (int i = 0; i < fanSpeedLevel; i++) {
+    digitalWrite(FAN_SPEED_GPIO, HIGH);
+    delay(100);
+    digitalWrite(FAN_SPEED_GPIO, LOW);
+    delay(100);
+  }
+}
+
+BLYNK_WRITE(V10) { if (param.asInt() == 1) setFanSpeed(1); }
+BLYNK_WRITE(V11) { if (param.asInt() == 1) setFanSpeed(2); }
+BLYNK_WRITE(V12) { if (param.asInt() == 1) setFanSpeed(3); }
+BLYNK_WRITE(V13) { if (param.asInt() == 1) setFanSpeed(4); }
+BLYNK_WRITE(V14) { if (param.asInt() == 1) setFanSpeed(5); }
+
+// 📏 CAPACITANCE MEASUREMENT
+void measureCapacitance() {
+  if (!isRunning) return;
+
+  digitalWrite(DISCHARGE_PIN, HIGH);
+  delay(100);
+  digitalWrite(DISCHARGE_PIN, LOW);
+
+  digitalWrite(CHARGE_PIN, HIGH);
+  unsigned long startTime = micros();
+  unsigned long timeout = startTime + 300000;
+
+  while (analogRead(MEASURE_PIN) < 1860 && micros() < timeout) {}
+
+  digitalWrite(CHARGE_PIN, LOW);
+
+  if (micros() >= timeout) {
+    Serial.println("⚠️ Timeout: Capacitance too high or disconnected.");
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+    Blynk.virtualWrite(VPIN_LED_RED, 0);
+    Blynk.virtualWrite(VPIN_LED_GREEN, 0);
+    return;
+  }
+
+  unsigned long elapsedTime = micros() - startTime;
+  float capacitance = (float)elapsedTime / (R * 0.693);
+  float capacitance_nF = capacitance * 1000;
+
+  Serial.print("📏 Capacitance: ");
+  Serial.print(capacitance_nF, 3);
+  Serial.println(" nF");
+
+  Blynk.virtualWrite(VPIN_CAPACITANCE, capacitance_nF);
+
+  if (capacitance_nF >= THRESHOLD_NF) {
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, HIGH);
+    Blynk.virtualWrite(VPIN_LED_RED, 255);
+    Blynk.virtualWrite(VPIN_LED_GREEN, 0);
+  } else {
+    digitalWrite(GREEN_LED, HIGH);
+    digitalWrite(RED_LED, LOW);
+    Blynk.virtualWrite(VPIN_LED_RED, 0);
+    Blynk.virtualWrite(VPIN_LED_GREEN, 255);
+  }
+}
+
+// ⏱ UPTIME
+void sendUptime() {
+  unsigned long uptimeSec = (millis() - startMillis) / 1000;
+  Blynk.virtualWrite(VPIN_UPTIME, uptimeSec);
+}
